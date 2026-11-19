@@ -81,11 +81,12 @@ def call(Map cfg) {
                     stage('Image build') {
                         steps {
                             sh '''
-                                podman build --pull=missing --no-cache \
+                                # docker format keeps HEALTHCHECK; docker-archive is what Trivy --input reads
+                                podman build --format docker --pull=missing --no-cache \
                                   --label org.opencontainers.image.revision=$GIT_COMMIT \
                                   --label org.opencontainers.image.version=$IMAGE_TAG \
                                   -t localhost/$APP_NAME:$IMAGE_TAG .
-                                podman save --format oci-archive -o image.tar localhost/$APP_NAME:$IMAGE_TAG
+                                podman save --format docker-archive -o image.tar localhost/$APP_NAME:$IMAGE_TAG
                             '''
                         }
                     }
