@@ -1,0 +1,123 @@
+---
+# Deploy a Docker Compose application by digest, verify it, roll back on failure.
+# Required extra vars: target_host image_ref instance app_port app_env
+#   app_version health_path compose_src release_id record_file
+- name: Deploy {{ instance }} by digest
+  hosts: all
+  gather_facts: false
+  vars:
+    app_dir: "/opt/tgh-apps/{{ instance }}"
+  tasks:
+    - name: Refuse mutable image references
+      ansible.builtin.assert:
+        that: image_ref is match('^[^@\s]+@sha256:[0-9a-f]{64}$')
+        fail_msg: "image_ref must be repository@sha256:digest"
+
+    - name: Ensure application directory
+      ansible.builtin.file:
+        path: "{{ app_dir }}"
+        state: directory
+        mode: "0750"
+
+    - name: Read currently deployed reference (rollback point)
+      ansible.builtin.slurp:
+        src: "{{ app_dir }}/.env"
+      register: current_env
+      failed_when: false
+
+    - name: Save rollback point
+      ansible.builtin.copy:
+        content: "{{ current_env.content | b64decode }}"
+        dest: "{{ app_dir }}/.env.previous"
+        mode: "0640"
+      when: current_env.content is defined
+
+    - name: Install compose definition from the reviewed commit
+      ansible.builtin.copy:
+        src: "{{ compose_src }}"
+        dest: "{{ app_dir }}/compose.yaml"
+        mode: "0640"
+
+    - name: Write runtime environment
+      ansible.builtin.copy:
+        dest: "{{ app_dir }}/.env"
+        mode: "0640"
+        content: |
+          IMAGE_REF={{ image_ref }}
+          APP_INSTANCE={{ instance }}
+          APP_PORT={{ app_port }}
+          APP_ENV={{ app_env }}
+          APP_VERSION={{ app_version }}
+          RELEASE_ID={{ release_id }}
+
+    - name: Deploy and verify (roll back on failure)
+      block:
+        - name: Pull and start
+          ansible.builtin.command:
+            cmd: docker compose -p {{ instance }} up -d --pull always --remove-orphans --wait --wait-timeout 90
+            chdir: "{{ app_dir }}"
+          changed_when: true
+
+        - name: Health check
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:{{ app_port }}{{ health_path }}"
+            return_content: true
+          register: health
+          retries: 10
+          delay: 3
+          until: health.status == 200
+
+        - name: Running image digest
+          ansible.builtin.command:
+            cmd: docker inspect --format {{ '{{' }}index .Config.Image{{ '}}' }} {{ instance }}
+          register: running_ref
+          changed_when: false
+
+        - name: Running image repo digests
+          ansible.builtin.command:
+            cmd: docker image inspect --format {{ '{{' }}json .RepoDigests{{ '}}' }} {{ running_ref.stdout }}
+          register: repo_digests
+          changed_when: false
+
+        - name: Verify the running container is the approved digest
+          ansible.builtin.assert:
+            that: image_ref in (repo_digests.stdout | from_json)
+            fail_msg: "running image {{ repo_digests.stdout }} is not {{ image_ref }}"
+      rescue:
+        - name: Restore previous release
+          ansible.builtin.copy:
+            src: "{{ app_dir }}/.env.previous"
+            dest: "{{ app_dir }}/.env"
+            remote_src: true
+            mode: "0640"
+          when: current_env.content is defined
+
+        - name: Restart previous release
+          ansible.builtin.command:
+            cmd: docker compose -p {{ instance }} up -d --wait --wait-timeout 90
+            chdir: "{{ app_dir }}"
+          when: current_env.content is defined
+          failed_when: false
+
+        - name: Fail the deployment
+          ansible.builtin.fail:
+            msg: "deployment of {{ image_ref }} failed; rolled back to previous release: {{ current_env.content is defined }}"
+
+    - name: Deployment record
+      ansible.builtin.set_fact:
+        record:
+          release_id: "{{ release_id }}"
+          host: "{{ target_host }}"
+          instance: "{{ instance }}"
+          environment: "{{ app_env }}"
+          image_ref: "{{ image_ref }}"
+          previous: "{{ (current_env.content | b64decode | regex_search('IMAGE_REF=(.*)', '\\1') | first) if current_env.content is defined else 'none' }}"
+          health: "{{ health.json | default(health.content) }}"
+          verified_digest: true
+
+    - name: Write deployment record on the runner
+      ansible.builtin.copy:
+        content: "{{ record | to_nice_json }}\n"
+        dest: "{{ record_file }}"
+        mode: "0640"
+      delegate_to: localhost

@@ -1,0 +1,32 @@
+#!/bin/bash
+# Append-only evidence ingest (installed as /usr/local/sbin/evidence-ingest on
+# the evidence host, run via sudo from a forced SSH command).
+# Usage over SSH:  ingest <release_id> <part> <sha256-of-tgz>   (tgz on stdin)
+# A part can be written once; existing evidence is never overwritten.
+set -euo pipefail
+ROOT=/data/evidence/releases
+read -r verb rid part sum <<<"${SSH_ORIGINAL_COMMAND:-}"
+log() { logger -t evidence-ingest -- "release_id=$rid part=$part $*"; }
+[ "$verb" = ingest ] || { echo "only 'ingest' is allowed" >&2; exit 2; }
+[[ "$rid" =~ ^[a-z0-9][a-z0-9-]{5,120}$ ]] || { echo "bad release_id" >&2; exit 2; }
+[[ "$part" =~ ^(release|deploy|failed)$ ]] || { echo "bad part" >&2; exit 2; }
+[[ "$sum" =~ ^[0-9a-f]{64}$ ]] || { echo "bad sha256" >&2; exit 2; }
+dest="$ROOT/$rid/$part"
+[ ! -e "$dest" ] || { log "rejected: already exists"; echo "evidence $rid/$part already exists" >&2; exit 3; }
+tmp=$(mktemp -d "$ROOT/.incoming.XXXXXX")
+trap 'chattr -R -i "$tmp" 2>/dev/null; rm -rf "$tmp"' EXIT
+head -c 200000000 > "$tmp/evidence.tgz"
+got=$(sha256sum "$tmp/evidence.tgz" | cut -d' ' -f1)
+[ "$got" = "$sum" ] || { log "rejected: sha256 mismatch"; echo "sha256 mismatch" >&2; exit 4; }
+mkdir "$tmp/files"
+tar -xzf "$tmp/evidence.tgz" -C "$tmp/files" --no-same-owner --no-same-permissions
+( cd "$tmp/files" && sha256sum -c --quiet SHA256SUMS ) || { log "rejected: SHA256SUMS check failed"; exit 4; }
+printf '%s  evidence.tgz\nreceived_at=%s\nfrom=%s\n' "$got" "$(date -Is)" "${SSH_CLIENT%% *}" > "$tmp/RECEIPT"
+mkdir -p "$ROOT/$rid"
+mv "$tmp" "$dest"
+trap - EXIT
+chown -R root:root "$dest"; chmod -R a-w,go-rwx "$dest"; chmod 0550 "$dest" "$dest/files"
+find "$dest" -type d -exec chmod 0550 {} +
+chattr -R +i "$dest"
+log "stored sha256=$got"
+echo "stored $rid/$part sha256=$got"
