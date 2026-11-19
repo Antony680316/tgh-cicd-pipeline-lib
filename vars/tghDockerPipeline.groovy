@@ -185,7 +185,9 @@ def call(Map cfg) {
                         }
                         env.APPROVER = who
                         env.APPROVED_AT = new Date().format("yyyy-MM-dd'T'HH:mm:ssXXX", TimeZone.getTimeZone('Asia/Taipei'))
-                        tghRelease.event(this, 'approved', "approver=${env.APPROVER}")
+                        // No agent is held while waiting for approval, so no sh steps here;
+                        // the 'approved' audit event is emitted at the start of Promote.
+                        echo "approved by ${env.APPROVER} at ${env.APPROVED_AT}"
                     }
                 }
             }
@@ -195,6 +197,7 @@ def call(Map cfg) {
                 agent { label 'docker-build' }
                 steps {
                     cleanWs()
+                    script { tghRelease.event(this, 'approved', "approver=${env.APPROVER} at=${env.APPROVED_AT}") }
                     withCredentials([
                         usernamePassword(credentialsId: 'harbor-cicd-test', usernameVariable: 'SRC_USER', passwordVariable: 'SRC_PASS'),
                         usernamePassword(credentialsId: 'harbor-cicd-prod', usernameVariable: 'DST_USER', passwordVariable: 'DST_PASS')]) {
