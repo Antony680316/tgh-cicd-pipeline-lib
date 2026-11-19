@@ -209,8 +209,22 @@ def call(Map cfg) {
                             DST="$TGH_REGISTRY/$TGH_PROD_PROJECT/$APP_NAME"
                             skopeo copy --preserve-digests --src-authfile "$SRC_AUTH" --dest-authfile "$DST_AUTH" \
                               "docker://$TEST_IMAGE_REF" "docker://$DST:$IMAGE_TAG"
-                            GOT=$(skopeo inspect --authfile "$DST_AUTH" --format '{{.Digest}}' "docker://$DST:$IMAGE_TAG")
+                            # Harbor scans on push and, with prevent_vul, refuses to serve the
+                            # image until that scan is done. Wait for it (max 5 min); any other
+                            # refusal (e.g. the scan found High/Critical) fails immediately.
+                            GOT=""
+                            for i in $(seq 1 30); do
+                                if OUT=$(skopeo inspect --authfile "$DST_AUTH" --format '{{.Digest}}' "docker://$DST:$IMAGE_TAG" 2>&1); then
+                                    GOT="$OUT"; break
+                                fi
+                                case "$OUT" in
+                                    *'"Pending" status'*|*'"Running" status'*|*'"Scanning" status'*)
+                                        echo "waiting for Harbor vulnerability scan ($i/30)"; sleep 10 ;;
+                                    *) echo "$OUT" | tail -1 > reports/promotion-refused.txt; cat reports/promotion-refused.txt; break ;;
+                                esac
+                            done
                             rm -f "$SRC_AUTH" "$DST_AUTH"
+                            [ -n "$GOT" ] || { echo "Harbor refused the promoted image (see above)"; exit 1; }
                             echo "prod_image=$DST@$GOT" > reports/promotion.txt
                             [ "$GOT" = "$IMAGE_DIGEST" ] || { echo "digest mismatch after promotion: $GOT != $IMAGE_DIGEST"; exit 1; }
                         '''
