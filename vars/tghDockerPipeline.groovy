@@ -44,9 +44,12 @@ def call(Map cfg) {
                     stage('Secret scan') {
                         steps {
                             sh '''
-                                gitleaks version > reports/tool-gitleaks.txt
-                                gitleaks dir --no-banner --redact --exit-code 1 \
-                                  --report-format json --report-path reports/gitleaks.json .
+                                dpkg-query -W gitleaks > reports/tool-gitleaks.txt 2>/dev/null || gitleaks version > reports/tool-gitleaks.txt
+                                # full history of the checked-out commit, then the working tree
+                                gitleaks detect --no-banner --redact --exit-code 1 --source . \
+                                  --report-format json --report-path reports/gitleaks-history.json
+                                gitleaks detect --no-banner --redact --exit-code 1 --no-git --source . \
+                                  --report-format json --report-path reports/gitleaks.json
                             '''
                         }
                     }
