@@ -217,11 +217,12 @@ def call(Map cfg) {
                                 if OUT=$(skopeo inspect --authfile "$DST_AUTH" --format '{{.Digest}}' "docker://$DST:$IMAGE_TAG" 2>&1); then
                                     GOT="$OUT"; break
                                 fi
-                                case "$OUT" in
-                                    *'"Pending" status'*|*'"Running" status'*|*'"Scanning" status'*)
-                                        echo "waiting for Harbor vulnerability scan ($i/30)"; sleep 10 ;;
-                                    *) echo "$OUT" | tail -1 > reports/promotion-refused.txt; cat reports/promotion-refused.txt; break ;;
-                                esac
+                                # Harbor's message quotes the status as \\"Pending\\" (escaped)
+                                if printf '%s' "$OUT" | grep -Eq 'scan is in [^a-zA-Z]*(Pending|Running|Scanning)[^a-zA-Z]* status'; then
+                                    echo "waiting for Harbor vulnerability scan ($i/30)"; sleep 10
+                                else
+                                    printf '%s\\n' "$OUT" | tail -1 > reports/promotion-refused.txt; cat reports/promotion-refused.txt; break
+                                fi
                             done
                             rm -f "$SRC_AUTH" "$DST_AUTH"
                             [ -n "$GOT" ] || { echo "Harbor refused the promoted image (see above)"; exit 1; }
